@@ -51,3 +51,7 @@ tags
 
 # virtual env files
 /venv/
+
+# output files of tests
+/test/out/
+/test/*.wmv

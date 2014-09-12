@@ -3,9 +3,14 @@ import sys
 import subprocess
 import os
 import json
+import log
 from io import BytesIO
 from datetime import timedelta
 from math import ceil
+
+logger = log.getChild('clipper')
+ffmpeglogger = log.getChild('ffmpeg')
+ffprobelogger = log.getChild('ffprobe')
 
 def prepare_output_dir(proj):
     proj.outdir = os.path.abspath(os.path.join(
@@ -13,31 +18,34 @@ def prepare_output_dir(proj):
                  proj.title))
     outdir = proj.outdir
     try:
+        logger.info('preparing output folder %s', outdir)
         os.makedirs(outdir)
     except Exception as err:
-        print(err)
+        logger.debug('makedirs returns error %s', err)
 
     if not os.path.isdir(outdir):
-        print('%s is not a dir'%(outdir,))
+        raise Exception('%s is not a dir'%(outdir,))
     elif not os.access(outdir, os.F_OK):
-        print('fail to create dir %s'%(outdir,))
+        raise Exception('fail to create dir %s'%(outdir,))
     elif not os.access(outdir, os.R_OK | os.W_OK):
-        print('dir %s is not accessible'%(outdir,))
+        raise Exception('dir %s is not accessible'%(outdir,))
 
 def test_video(proj):
     video = proj.video
-    probep = subprocess.Popen(
-                 [ffprobe, '-i', video, '-show_error', '-of', 'json'],
-                 stdout = subprocess.PIPE, stderr = subprocess.DEVNULL
-            )
-    ans = probep.communicate()[0]
-    try:
-        ans = json.loads(ans.decode(sys.getfilesystemencoding()))
-        if 'error' in ans:
-            print('cannot open video file: %s' % (ans['error']['string'],))
-            return False
-    except Exception as error:
-        print(error)
+    cmd = [ffprobe, '-i', video, '-hide_banner', '-show_error', '-of', 'json']
+
+    logger.info('testing video file %s', video)
+    logger.debug('testing with command "%s"', ' '.join(cmd))
+    probep = subprocess.Popen(cmd, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+
+    ans, err = probep.communicate()
+    ffprobelogger.info('meta data: \n%s', err.decode())
+
+    ans = json.loads(ans.decode(sys.getfilesystemencoding()))
+    ffprobelogger.info('probe answers: %s', ans)
+
+    if 'error' in ans:
+        raise Exception('cannot open video file: (%(code)s) %(string)s' % ans['error'])
     return True
 
 def parse_timestamp(s):
@@ -52,6 +60,7 @@ def parse_timestamp(s):
     Float and any other types could be converted to strings of
     above format by builtin str() function are also acceptable.
     '''
+    logger.debug('parse timestamp %s %s', type(s), s)
     s = str(s)
     hour, min, sec, milli = 0, 0, 0, 0
 
@@ -75,11 +84,11 @@ def parse_timestamp(s):
 def get_offset_duration(clip):
     s, e = map(parse_timestamp, (clip['start'], clip['end']))
     if s >= e:
-        raise Exception('clip %(title)s: start time %(start)s of should be earlier than end time %(end)s' % clip)
+        raise Exception('clip %(title)s: start time %(start)s should be earlier than end time %(end)s' % clip)
+    duration = ceil((e-s).total_seconds())
 
-    return clip['start'], str(ceil((e-s).total_seconds()))
-
-
+    logger.debug('clip "%s" starts at %s ends at %s duration %d', clip['title'], clip['start'], clip['end'], duration)
+    return clip['start'], str(duration)
 
 def clip(proj, clip, overwrite=True):
     buf = BytesIO()
@@ -87,16 +96,19 @@ def clip(proj, clip, overwrite=True):
     output = '.'.join([output, proj.output.format])
     overwriteopt = '-y' if overwrite else '-n'
     offset, duration = get_offset_duration(clip)
-    print('outfile:', output)
     cmd = [ffmpeg, '-ss', offset, '-i', proj.video, '-c', 'copy',
            '-nostdin', overwriteopt, '-t', duration, output ]
+    logger.info('exporting clip %d to %s', clip['idx'], output)
+    logger.debug('export cmd "%s"', ' '.join(cmd))
     ffmpegp = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     while True:
         out = ffmpegp.stdout.read(1)
-        buf.write(out)
         if out in (b'\r', b'\n'):
-            sys.stdout.write(buf.getvalue().decode().strip('\x00'))
-            buf.truncate(0)
+            if len(buf.getvalue()) > 0:
+                ffmpeglogger.debug(buf.getvalue().decode().strip('\x00'))
+                buf.truncate(0)
+        else:
+            buf.write(out)
 
         if ffmpegp.returncode is None:
             if ffmpegp.poll() is not None: break
@@ -124,8 +136,14 @@ def main():
             section['idx'] = idx
             clip(proj, section)
             idx += 1
+    logger.info('all clips have been exported.')
 
 if __name__ == '__main__':
-    main()
+    logger.setLevel(log.INFO)
+    ffmpeglogger.setLevel(log.INFO)
+    try:
+        main()
+    except Exception as err:
+        logger.critical('error "%s" happen during handling, aboring...', err, exc_info=err)
 
 

@@ -1,3 +1,4 @@
+import yaml
 import lya
 import sys
 import subprocess
@@ -32,7 +33,7 @@ def prepare_output_dir(proj):
 
 def test_video(proj):
     video = proj.video
-    cmd = [ffprobe, '-i', video, '-hide_banner', '-show_error', '-of', 'json']
+    cmd = [conf.tools.ffprobe, '-i', video, '-hide_banner', '-show_error', '-of', 'json']
 
     logger.info('testing video file %s', video)
     logger.debug('testing with command "%s"', ' '.join(cmd))
@@ -90,13 +91,13 @@ def get_offset_duration(clip):
     logger.debug('clip "%s" starts at %s ends at %s duration %d', clip['title'], clip['start'], clip['end'], duration)
     return clip['start'], str(duration)
 
-def clip(proj, clip, overwrite=True):
+def clip(proj, clip):
     buf = BytesIO()
     output = os.path.join(proj.outdir, '%(idx)02d-%(title)s-%(speaker)s'%clip)
     output = '.'.join([output, proj.output.format])
-    overwriteopt = '-y' if overwrite else '-n'
+    overwriteopt = '-y' if conf.clip.overwrite else '-n'
     offset, duration = get_offset_duration(clip)
-    cmd = [ffmpeg, '-ss', offset, '-i', proj.video, '-c', 'copy',
+    cmd = [conf.tools.ffmpeg, '-ss', offset, '-i', proj.video, '-c', 'copy',
            '-nostdin', overwriteopt, '-t', duration, output ]
     logger.info('exporting clip %d to %s', clip['idx'], output)
     logger.debug('export cmd "%s"', ' '.join(cmd))
@@ -105,7 +106,7 @@ def clip(proj, clip, overwrite=True):
         out = ffmpegp.stdout.read(1)
         if out in (b'\r', b'\n'):
             if len(buf.getvalue()) > 0:
-                ffmpeglogger.debug(buf.getvalue().decode().strip('\x00'))
+                ffmpeglogger.info(buf.getvalue().decode().strip('\x00'))
                 buf.truncate(0)
         else:
             buf.write(out)
@@ -115,16 +116,47 @@ def clip(proj, clip, overwrite=True):
         else:
             break;
 
+class ClipConfig(lya.AttrDict):
+    def dump(self, stream):
+        yaml.representer.SafeRepresenter.add_representer(
+            ClipConfig, yaml.representer.SafeRepresenter.represent_dict )
+        super().dump(stream)
 
-ffmpeg = r'D:\bin\ffmpeg\bin\ffmpeg.exe'
-ffprobe = r'D:\bin\ffmpeg\bin\ffprobe.exe'
+    def __str__(self):
+        buf = BytesIO()
+        self.dump(buf)
+        return buf.getvalue().decode('utf-8').strip('\x00')
 
-encoding = None
+    @staticmethod
+    def default_config():
+        apppath = get_app_path()
+        conf = ClipConfig()
+
+        # section 'tools' in which ffmpeg binary pathes
+        # are specified
+        conf.tools = lya.AttrDict()
+        conf.tools.ffmpeg = os.path.join(apppath, 'bin', 'ffmpeg.exe')
+        conf.tools.ffprobe = os.path.join(apppath, 'bin', 'ffprobe.exe')
+
+        # section 'debug' in which debug levels of individual
+        # modules are specified
+        conf.debug = lya.AttrDict()
+        conf.debug.clipper = 'info'
+        conf.debug.ffmpeg = 'warning'
+        conf.debug.ffprobe = 'warning'
+
+        # section 'clip' defines settings used in section exporting
+        conf.clip = lya.AttrDict()
+        conf.clip.overwrite = True
+        conf.clip.encoding = None
+
+        return conf
+
 def main():
     fp = os.path.abspath(sys.argv[1])
     os.chdir(os.path.dirname(fp))
 
-    with open(fp, 'r', encoding=encoding) as f:
+    with open(fp, 'r', encoding=conf.clip.encoding) as f:
         proj = lya.AttrDict.from_yaml(f)
         proj.video = os.path.abspath(proj.video)
         proj.config = fp
@@ -138,12 +170,51 @@ def main():
             idx += 1
     logger.info('all clips have been exported.')
 
+def get_app_path(appfile=None):
+    appfile = appfile if appfile else sys.argv[0]
+    apppath = os.path.dirname(appfile)
+    apppath = '.' if not apppath else apppath
+    oldpath = os.path.abspath(os.curdir)
+    os.chdir(apppath)
+    apppath = os.path.abspath(os.curdir)
+    os.chdir(oldpath)
+    return os.path.normcase(apppath)
+
+def load_config(filename = 'settings.yaml', create_if_not_exist = True):
+    conffile = os.path.join(get_app_path(), filename)
+    conf = ClipConfig.default_config()
+    if os.access(conffile, os.F_OK):
+        logger.info('try loading configuration from %s', conffile)
+        try:
+            conf.update_yaml(conffile)
+        except Exception as err:
+            logger.critical('cannot load configuration file', exc_info=err)
+            sys.exit(2)
+
+    elif create_if_not_exist:
+        try:
+            with open(conffile, 'wb') as outf:
+                conf.dump(outf)
+        except Exception as err:
+            logger.warn('cannot create default configuration file', exc_info=err)
+
+    logger.setLevel(log.getLevelByName(conf.debug.clipper))
+    ffmpeglogger.setLevel(log.getLevelByName(conf.debug.ffmpeg))
+    ffprobelogger.setLevel(log.getLevelByName(conf.debug.ffprobe))
+    logger.debug("settings loaded:\n%s", conf)
+    return conf
+
+
 if __name__ == '__main__':
+    global conf
     logger.setLevel(log.INFO)
     ffmpeglogger.setLevel(log.INFO)
+    ffprobelogger.setLevel(log.INFO)
+    conf = load_config()
     try:
         main()
     except Exception as err:
         logger.critical('error "%s" happen during handling, aboring...', err, exc_info=err)
+        sys.exit(1)
 
 

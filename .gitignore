@@ -55,3 +55,6 @@ tags
 # output files of tests
 /test/out/
 /test/*.wmv
+
+# generated settings
+settings.yaml
